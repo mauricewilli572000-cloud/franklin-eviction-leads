@@ -1,0 +1,76 @@
+name: Franklin County Eviction Leads
+
+# Nightly: download the Clerk's 13 monthly F.E.D. CSVs -> score landlords -> commit data
+# -> publish dashboard/ (evictions.json + GHL CSV) on GitHub Pages. The combined
+# Foreclosure Leads dashboard reads evictions.json from this repo's Pages site.
+
+on:
+  schedule:
+    - cron: "45 8 * * *"   # ~4:45 AM Eastern; the Clerk regenerates its reports overnight
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "eviction-scrape-and-pages"
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      # A fresh runner has no cached CSVs, so all 13 months are downloaded every night
+      # (dispositions on older months stay current). If the Clerk ever blocks GitHub's
+      # servers, CSVs placed in manual_csv/ are used instead.
+      - name: Run pipeline
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: python run_pipeline.py
+
+      - name: Commit data
+        run: |
+          git config user.name "eviction-lead-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/ dashboard/
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Automated eviction lead scrape: $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git pull --rebase
+            git push
+          fi
+
+      - name: Upload dashboard artifact for Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dashboard
+
+  deploy-pages:
+    needs: scrape
+    runs-on: ubuntu-22.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
