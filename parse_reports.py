@@ -158,6 +158,10 @@ def _zip5(z: str) -> str:
 
 def parse_file(path: Path) -> list[Filing]:
     headers, rows = read_csv_rows(path)
+    if not any((h or "").strip() for h in headers):
+        # The Clerk publishes next month's file on the 1st, before it has any cases/headers.
+        print(f"[parse] {Path(path).name}: empty file (no header row) - skipped")
+        return []
     mapping = map_headers(headers)
     required = [(None, "case_number"), ("defendant", "street")]
     missing = [r for r in required if r not in mapping]

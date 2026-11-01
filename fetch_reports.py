@@ -107,6 +107,10 @@ def download_reports(today: date | None = None, force: bool = False) -> list[Pat
         if "html" in ctype.lower():
             print(f"[fetch] WARN {link['url']} returned HTML, not CSV; skipping")
             continue
+        if len(resp.content.strip()) < 20:          # blank placeholder for a month that just started
+            print(f"[fetch] {dest.name} is empty ({len(resp.content)} bytes); skipping")
+            dest.unlink(missing_ok=True)
+            continue
         dest.write_bytes(resp.content)
         saved.append(dest)
         print(f"[fetch] saved {dest.name} ({len(resp.content):,} bytes)")

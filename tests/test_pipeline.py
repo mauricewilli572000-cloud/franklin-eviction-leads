@@ -289,3 +289,22 @@ def test_shell_entity_mailed_c_o_institutional_investor_is_dropped():
         f.plaintiff_street = "C/O PROGRESS RESIDENTIAL MANAGEMENT SERVICES LLC PO BOX 4090"
     assert landlord_leads.aggregate(ff, today=date(2026, 10, 31)) == []
 
+
+def test_empty_placeholder_month_is_skipped(tmp_path):
+    """Regression: on the 1st the Clerk lists next month's CSV as a ~3-byte blank file."""
+    d = tmp_path / "e"
+    d.mkdir()
+    write_csv(d / "2026-10-01_2026-10-31.csv", [["1", "2026-10-01", "ACME LLC", "5 Elm St", "T", "9 Oak St"]],
+              header=["Case Number", "File Date", "First Plaintiff", "Plaintiff Address",
+                      "First Defendant", "Defendant Address"])
+    (d / "2026-11-01_2026-11-30.csv").write_bytes(b'""\r\n')
+    assert [f.case_number for f in parse_reports.parse_directory(d)] == ["1"]
+
+
+def test_unmappable_headers_still_fail_loudly(tmp_path):
+    d = tmp_path / "u"
+    d.mkdir()
+    (d / "x.csv").write_text("FOO,BAR\n1,2\n")
+    with pytest.raises(parse_reports.ParseError):
+        parse_reports.parse_directory(d)
+
