@@ -11,6 +11,15 @@ first defendant + most recent address.
 3. `landlord_leads.py` — groups filings by plaintiff (landlord), classifies owner (individual / LLC / trust / company / manager / institutional), drops housing authorities, banks, government and mega-filers (> 75 filings/yr), and scores 0-100 (HOT >= 70, WARM >= 50). Repeat filers with several rentals, individual owners and out-of-state mailing addresses score highest.
 4. `exporters.py` — accumulates `data/eviction_records.json` (merge by lead_id), holds address-less leads in `data/eviction_pending_records.json` (retried each run), writes `dashboard/evictions.json` + `dashboard/evictions_ghl_export.csv` (GoHighLevel upload) — same decisions as the foreclosure scrapers.
 
+## Owner matching (Auditor)
+`parcels.py` downloads the Auditor's monthly `Parcel.csv` (public, ~100 MB; discovered automatically, override with env `PARCEL_CSV_URL`)
+and matches each rental (the defendant's address) to its parcel:
+- **verified** - the plaintiff is the owner of record; the Auditor's tax-mailing address replaces the court's (kept as "Court Mailing Address").
+- **via manager** - a property manager filed; the lead becomes the owner of record + their mailing address (manager kept in "Via Manager").
+- **plaintiff not owner of record** - flagged for manual verification.
+- Owners holding >= 150 parcels countywide are treated as institutional; owners with <= 10 parcels get a score bonus.
+If the Auditor is unreachable the run continues without enrichment. Skip it with `--no-parcels`; use a local file with `--parcel-csv path`.
+
 ## Run
 ```
 pip install -r requirements.txt

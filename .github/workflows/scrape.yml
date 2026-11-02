@@ -8,6 +8,9 @@ on:
   schedule:
     - cron: "45 8 * * *"   # ~4:45 AM Eastern; the Clerk regenerates its reports overnight
   workflow_dispatch: {}
+  push:                      # also run when the code changes (bot data commits don't re-trigger this)
+    branches: [main]
+    paths: ["*.py", "requirements.txt", ".github/workflows/scrape.yml", "tests/**"]
 
 permissions:
   contents: write
@@ -21,7 +24,7 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:

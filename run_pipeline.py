@@ -15,6 +15,7 @@ import config
 import exporters
 import fetch_reports
 import landlord_leads
+import parcels
 import parse_reports
 
 
@@ -25,6 +26,8 @@ def main(argv=None) -> int:
     ap.add_argument("--force", action="store_true", help="re-download every month")
     ap.add_argument("--include-institutional", action="store_true", help="keep housing authorities / mega-filers")
     ap.add_argument("--min-filings", type=int, default=config.MIN_FILINGS_FOR_LEAD)
+    ap.add_argument("--no-parcels", action="store_true", help="skip Auditor owner matching")
+    ap.add_argument("--parcel-csv", type=Path, help="use this local Parcel.csv instead of downloading it")
     ap.add_argument("--today", type=date.fromisoformat, default=date.today())
     args = ap.parse_args(argv)
 
@@ -46,6 +49,12 @@ def main(argv=None) -> int:
 
     filings = parse_reports.parse_directory(src_dir)
     print(f"[parse] {len(filings):,} unique eviction cases")
+
+    if not args.no_parcels:
+        wanted = {(parcels.street_of(f.property_address), f.property_zip) for f in filings if f.property_address}
+        index = parcels.load_index(wanted, csv_path=args.parcel_csv)
+        pstats = parcels.enrich_filings(filings, index)
+        print(f"[parcels] enrichment: {pstats}")
 
     landlords = landlord_leads.aggregate(filings, today=args.today,
                                          include_institutional=args.include_institutional)

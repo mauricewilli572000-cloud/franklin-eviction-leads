@@ -93,6 +93,11 @@ class Landlord:
     signals: list[str] = field(default_factory=list)
     top_street_share: float = 0.0
     property_kind: str = "scattered"      # scattered | apartment complex
+    verification: str = ""                # verified | via manager | plaintiff not owner of record | no parcel match | ""
+    portfolio: int = 0                    # parcels the owner holds countywide (Auditor)
+    via_managers: list[str] = field(default_factory=list)
+    court_mailing: str = ""
+    parcels_matched: int = 0
 
     @property
     def lead_id(self) -> str:
@@ -131,6 +136,8 @@ def aggregate(filings: list[Filing], today: date | None = None,
         # shell entities mailed "C/O PROGRESS RESIDENTIAL ..." etc. belong to corporate investors
         if _any(config.INSTITUTIONAL_PATTERNS, normalize_name(ll.mailing_street)):
             ll.owner_type = "institutional"
+        if ll.portfolio >= config.PORTFOLIO_INSTITUTIONAL:
+            ll.owner_type = "institutional"          # owns a big slice of the county: not a tired landlord
         if ll.owner_type == "institutional" and not include_institutional:
             continue
         _score(ll, today)
@@ -167,6 +174,23 @@ def _compute(ll: Landlord, today: date) -> None:
             props.append(f.property_address)
     ll.properties = props
     ll.n_properties = len(props)
+
+    # Auditor owner verification (parcels.enrich_filings) -------------------------------------
+    st = Counter(f.parcel_status for f in ll.filings if f.parcel_status)
+    ll.parcels_matched = st["confirmed"] + st["mismatch"] + st["via_manager"]
+    ll.portfolio = max((f.owner_portfolio for f in ll.filings), default=0)
+    ll.via_managers = sorted({f.via_manager for f in ll.filings if f.via_manager})
+    ll.court_mailing = next((f.court_mailing for f in newest_first if f.court_mailing), "")
+    if not st:
+        ll.verification = ""
+    elif st["via_manager"] and st["via_manager"] >= st["confirmed"] + st["mismatch"]:
+        ll.verification = "via manager"
+    elif st["confirmed"] and st["confirmed"] >= st["mismatch"]:
+        ll.verification = "verified"
+    elif st["mismatch"]:
+        ll.verification = "plaintiff not owner of record"
+    else:
+        ll.verification = "no parcel match"
 
     # Apartment-complex detection: many filings on one street, or a community-style name.
     streets = Counter(street_name(f.property_address) for f in ll.filings if f.property_address)
@@ -241,6 +265,20 @@ def _score(ll: Landlord, today: date) -> None:
         s += 10; sig.append(f"out-of-state mailing ({ll.mailing_state})")
     elif ll.mailing_zip and ll.properties and not any(ll.mailing_zip in p for p in ll.properties):
         s += 3; sig.append("mailing ZIP differs from rental ZIPs")
+
+    if ll.portfolio:
+        if ll.portfolio <= 10:
+            s += 10; sig.append(f"owns {ll.portfolio} parcel{'s' if ll.portfolio != 1 else ''} countywide (small owner)")
+        elif ll.portfolio <= 40:
+            s += 5; sig.append(f"owns {ll.portfolio} parcels countywide")
+        else:
+            sig.append(f"owns {ll.portfolio} parcels countywide (large owner)")
+    if ll.verification == "verified":
+        sig.append("owner verified on Auditor records")
+    elif ll.verification == "via manager":
+        sig.append(f"owner of record found via manager ({', '.join(ll.via_managers[:2])})")
+    elif ll.verification == "plaintiff not owner of record":
+        sig.append("plaintiff is not the owner of record - verify before outreach")
 
     if ll.dismissed >= 2:
         s += 5; sig.append(f"{ll.dismissed} dismissals (tenant churn)")

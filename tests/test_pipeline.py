@@ -72,6 +72,13 @@ def isolated_data(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DASHBOARD_JSON", data / "dash" / "evictions.json")
     monkeypatch.setattr(config, "GHL_CSV", data / "dash" / "ghl.csv")
     monkeypatch.setattr(config, "MANUAL_DIR", data / "manual")
+    import parcels
+    _real_load = parcels.load_index
+
+    def _offline_load(wanted, csv_path=None):          # never touch the network in tests
+        return _real_load(wanted, csv_path) if csv_path else parcels.ParcelIndex()
+
+    monkeypatch.setattr(parcels, "load_index", _offline_load)
     monkeypatch.setattr(config, "MIN_FILINGS_FOR_LEAD", 2)
 
 
@@ -308,3 +315,114 @@ def test_unmappable_headers_still_fail_loudly(tmp_path):
     with pytest.raises(parse_reports.ParseError):
         parse_reports.parse_directory(d)
 
+
+
+# ----------------------------------------------------------------------------- Auditor matching
+PARCEL_HDR = ["PARCEL ID", "NAME1", "STADDR", "USPS_CITY", "ZIPCODE", "MAILAD3", "MAILAD4"]
+
+
+def _parcel_csv(tmp_path, rows):
+    p = tmp_path / "Parcel.csv"
+    with p.open("w", newline="", encoding="utf-8-sig") as fh:
+        w = csv.writer(fh)
+        w.writerow(PARCEL_HDR)
+        w.writerows(rows)
+    return p
+
+
+def _fil(name, addr, zip5="43201", is_person=None, pstreet="1 COURT ST", pcity="COLUMBUS", pstate="OH", pzip="43215", n=0):
+    from datetime import date
+    from parse_reports import Filing
+    return Filing(case_number=f"{name}-{addr}-{n}", file_date=date(2026, 10, 1 + n % 20), disposition="UNDISPOSED",
+                  plaintiff_name=name, plaintiff_street=pstreet, plaintiff_city=pcity, plaintiff_state=pstate,
+                  plaintiff_zip=pzip, property_address=f"{addr}, COLUMBUS, OH {zip5}", property_zip=zip5,
+                  plaintiff_is_person=is_person)
+
+
+def test_address_keys_ignore_units_suffix_and_direction():
+    import parcels
+    a = parcels.address_keys("10 N Oak Street Apt 2", "43201-1234")
+    b = parcels.address_keys("10 N OAK ST", "43201")
+    assert a == b and a[0]
+    assert parcels.address_keys("10 N OAK ST", "43201")[1] == parcels.address_keys("10 OAK ST", "43201")[1]
+    assert parcels.address_keys("", "43201") == ("", "")
+
+
+def test_names_match():
+    import parcels
+    assert parcels.names_match("DOE, JANE Q", "DOE JANE Q & JOHN R")
+    assert parcels.names_match("ACME HOLDINGS LLC", "ACME HOLDINGS")
+    assert not parcels.names_match("ACME HOLDINGS LLC", "OTHER HOLDINGS LLC")
+    assert not parcels.names_match("DOE, JANE", "ROE JANE")
+    assert not parcels.names_match("", "DOE JANE")
+
+
+def test_enrichment_confirmed_mismatch_unmatched_and_manager_regroup(tmp_path):
+    import parcels
+    from datetime import date
+    pc = _parcel_csv(tmp_path, [
+        ["P1", "DOE JANE Q", "10 OAK ST", "COLUMBUS", "43201", "44 ELM ST", "DAYTON OH 45402-1234"],
+        ["P2", "DOE JANE Q", "11 OAK ST", "COLUMBUS", "43201", "44 ELM ST", "DAYTON OH 45402-1234"],
+        ["P3", "SMITH ROBERT", "20 PINE RD", "COLUMBUS", "43206", "7 BIRCH LN", "CLEVELAND OH 44101"],
+        ["P4", "SMITH ROBERT", "21 PINE RD", "COLUMBUS", "43206", "7 BIRCH LN", "CLEVELAND OH 44101"],
+        ["P5", "OTHER LLC", "30 MAPLE DR", "COLUMBUS", "43211", "PO BOX 1", "AUSTIN TX 78701"],
+        ["P6", "ZZZ OTHER", "99 FAR AVE", "COLUMBUS", "43211", "1 X", "COLUMBUS OH 43211"],
+    ])
+    ff = [
+        _fil("DOE, JANE Q", "10 OAK STREET", is_person=True, n=0),
+        _fil("DOE, JANE Q", "11 N OAK ST APT 2", is_person=True, n=1),       # loose (direction/unit) match
+        _fil("ABC PROPERTY MANAGEMENT LLC", "20 PINE RD", "43206", n=2),
+        _fil("ABC PROPERTY MANAGEMENT LLC", "21 PINE RD", "43206", n=3),
+        _fil("ACME HOLDINGS LLC", "30 MAPLE DR", "43211", n=4),
+        _fil("ACME HOLDINGS LLC", "31 NOWHERE ST", "43211", n=5),
+    ]
+    wanted = {(parcels.street_of(f.property_address), f.property_zip) for f in ff}
+    idx = parcels.load_index(wanted, csv_path=pc)
+    assert idx.portfolio("DOE JANE Q") == 2 and idx.rows_read == 6
+    stats = parcels.enrich_filings(ff, idx)
+    assert stats["confirmed"] == 2 and stats["via_manager"] == 2 and stats["mismatch"] == 1 and stats["unmatched"] == 1
+
+    out = {l.name: l for l in landlord_leads.aggregate(ff, today=date(2026, 10, 31))}
+    jane = out["DOE, JANE Q"]
+    assert jane.verification == "verified" and jane.portfolio == 2
+    assert (jane.mailing_street, jane.mailing_city, jane.mailing_state, jane.mailing_zip) == ("44 ELM ST", "DAYTON", "OH", "45402")
+    assert jane.court_mailing.startswith("1 COURT ST")
+    smith = out["SMITH ROBERT"]                      # manager's filings re-attributed to the owner of record
+    assert smith.verification == "via manager" and smith.via_managers == ["ABC PROPERTY MANAGEMENT LLC"]
+    assert smith.owner_type == "individual" and smith.mailing_city == "CLEVELAND" and smith.filings_window == 2
+    assert "ABC PROPERTY MANAGEMENT LLC" not in out
+    acme = out["ACME HOLDINGS LLC"]
+    assert acme.verification == "plaintiff not owner of record"
+
+
+def test_large_owner_portfolio_is_dropped_as_institutional(tmp_path, monkeypatch):
+    import parcels
+    from datetime import date
+    monkeypatch.setattr(config, "PORTFOLIO_INSTITUTIONAL", 3)
+    rows = [[f"P{i}", "BIG LANDLORD LLC", f"{i} MAIN ST", "COLUMBUS", "43201", "1 X", "COLUMBUS OH 43201"] for i in range(4)]
+    pc = _parcel_csv(tmp_path, rows)
+    ff = [_fil("BIG LANDLORD LLC", f"{i} MAIN ST", n=i) for i in range(2)]
+    idx = parcels.load_index({(parcels.street_of(f.property_address), f.property_zip) for f in ff}, csv_path=pc)
+    parcels.enrich_filings(ff, idx)
+    assert landlord_leads.aggregate(ff, today=date(2026, 10, 31)) == []
+
+
+def test_auditor_failure_never_breaks_pipeline(tmp_path):
+    import parcels
+    bad = tmp_path / "Parcel.csv"
+    bad.write_text("FOO,BAR\n1,2\n")
+    idx = parcels.load_index({("1 A ST", "43201")}, csv_path=bad)      # unrecognised headers -> warn, empty
+    assert not idx
+    assert parcels.enrich_filings([_fil("X LLC", "1 A ST")], idx) == {"enabled": False}
+
+
+def test_stale_leads_are_pruned_between_runs(csv_dir, monkeypatch):
+    import run_pipeline
+    assert run_pipeline.main(["--from-dir", str(csv_dir), "--today", "2026-10-31"]) == 0
+    first = json.loads(config.RECORDS_JSON.read_text())
+    ghost = dict(first["records"][0], lead_id="ghost000000", owner_name="GHOST LLC")
+    first["records"].append(ghost)
+    config.RECORDS_JSON.write_text(json.dumps(first))
+    assert run_pipeline.main(["--from-dir", str(csv_dir), "--today", "2026-11-01"]) == 0
+    ids = {r["lead_id"] for r in json.loads(config.RECORDS_JSON.read_text())["records"]}
+    assert "ghost000000" not in ids and len(ids) == len(first["records"]) - 1

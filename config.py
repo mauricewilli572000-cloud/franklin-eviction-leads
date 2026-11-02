@@ -25,6 +25,7 @@ PENDING_JSON = DATA_DIR / "eviction_pending_records.json"  # leads without one (
 DASHBOARD_DIR = ROOT / "dashboard"                         # published to GitHub Pages
 DASHBOARD_JSON = DASHBOARD_DIR / "evictions.json"           # read by the Evictions tab of the combined dashboard
 GHL_CSV = DASHBOARD_DIR / "evictions_ghl_export.csv"        # GoHighLevel upload (also linked from the dashboard)
+CACHE_DIR = ROOT / ".cache"                                 # big downloads (Auditor Parcel.csv); git-ignored
 MANUAL_DIR = ROOT / "manual_csv"                            # fallback: CSVs dropped here are used if the Clerk blocks downloads
 
 # --- Polite fetching -------------------------------------------------------
@@ -92,3 +93,8 @@ TRUST_PATTERNS = [r"\bTRUST\b", r"\bTRUSTEE\b", r"\bESTATE\b"]
 # {"Exact Header In CSV": ("plaintiff"|"defendant"|None, "name"|"street"|"street2"|"city"|"state"|"zip"|
 #                          "case_number"|"file_date"|"disposition"|"disposition_date")}
 HEADER_OVERRIDES: dict = {}
+
+# --- Auditor owner matching (parcels.py) -------------------------------------
+PARCEL_CSV_INDEX_URL = "https://apps.franklincountyauditor.com/Parcel_CSV/"
+PARCEL_CSV_URL = None            # set (or env PARCEL_CSV_URL) to skip folder discovery
+PORTFOLIO_INSTITUTIONAL = 150    # owner holds >= this many parcels countywide -> institutional, dropped

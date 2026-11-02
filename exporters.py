@@ -20,6 +20,7 @@ GHL_COLUMNS = [
     "Full Name", "First Name", "Last Name", "Business Name",
     "Mailing Address", "City", "State", "Zip",
     "Rental Property Addresses", "Rental Property Count", "Property Profile",
+    "Owner Verification", "Owner Parcels Countywide", "Via Manager", "Court Mailing Address",
     "Filings 12mo", "Filings 90d", "Last Filing", "First Filing In Window",
     "Score", "Tier", "Owner Type", "Signals", "Case Numbers",
     "Lead Type", "Source", "Date Added", "Tags",
@@ -38,6 +39,11 @@ def _record(ll: Landlord, today: date) -> dict:
         "property_addresses": ll.properties[:MAX_PROPERTIES_LISTED],
         "property_count": ll.n_properties,
         "property_kind": ll.property_kind,
+        "verification": ll.verification,
+        "owner_portfolio": ll.portfolio,
+        "via_managers": ll.via_managers[:5],
+        "court_mailing": ll.court_mailing,
+        "parcels_matched": ll.parcels_matched,
         "filings_window": ll.filings_window,
         "filings_12m": ll.filings_12m,
         "filings_90d": ll.filings_90d,
@@ -113,6 +119,18 @@ def merge_and_save(landlords: list[Landlord], today: date | None = None) -> dict
                 stats["pending"] += 1
             pending[rec["lead_id"]] = rec
 
+    # The whole 13-month window is recomputed every run, so a lead that is no longer produced
+    # (reclassified, regrouped under its real owner, or aged out) should not linger. Guarded so a
+    # bad run that produced far fewer leads than usual cannot wipe the file.
+    current = {ll.lead_id for ll in landlords}
+    if records and len(current) >= 0.5 * len(records):
+        for store in (records, pending):
+            for lead_id in [k for k in store if k not in current]:
+                del store[lead_id]
+                stats["dropped"] = stats.get("dropped", 0) + 1
+    elif records:
+        print(f"[export] WARN only {len(current)} leads vs {len(records)} on file; not pruning")
+
     _save(config.RECORDS_JSON, records)
     _save(config.PENDING_JSON, pending)
     export_ghl_csv(list(records.values()))
@@ -166,6 +184,10 @@ def export_ghl_csv(records: list[dict]) -> None:
                 "Rental Property Addresses": "; ".join(r["property_addresses"]),
                 "Rental Property Count": r["property_count"],
                 "Property Profile": r.get("property_kind", ""),
+                "Owner Verification": r.get("verification", ""),
+                "Owner Parcels Countywide": r.get("owner_portfolio", "") or "",
+                "Via Manager": "; ".join(r.get("via_managers", [])),
+                "Court Mailing Address": r.get("court_mailing", ""),
                 "Filings 12mo": r["filings_12m"], "Filings 90d": r["filings_90d"],
                 "Last Filing": r["last_filing"], "First Filing In Window": r["first_filing"],
                 "Score": r["score"], "Tier": r["tier"], "Owner Type": r["owner_type"],
