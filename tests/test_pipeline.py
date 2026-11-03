@@ -486,3 +486,32 @@ def test_load_index_falls_back_to_auditor_csv_when_gis_is_down(monkeypatch, tmp_
     idx = parcels._real_load_index({("101 OAK ST", "43201")})
     assert idx and "Auditor" in idx.source and idx.lookup("101 OAK ST", "43201").owner == "ACME LLC"
 
+
+
+def _index(tmp_path, rows, wanted):
+    import parcels
+    f = tmp_path / "p.csv"
+    f.write_text("NAME1,STADDR,ZIPCODE,MAILAD3,MAILAD4\n" + "\n".join(rows) + "\n")
+    return parcels.build_index(f, wanted)
+
+
+def test_condo_unit_glued_to_parcel_street_still_matches(tmp_path):
+    import parcels
+    rows = ["ACME LLC,5555 GULLEDGE RD 4321,43081,PO BOX 5,SCOTTSDALE AZ 85251",
+            "DOE JANE,12 STINCHCOMB DR 12-A 34,43202,1 X ST,DAYTON OH 45402"]
+    idx = _index(tmp_path, rows, {("5555 GULLEDGE ROAD", "43081"), ("12 STINCHCOMB DRIVE", "43202")})
+    assert idx.lookup("5555 GULLEDGE ROAD", "43081").owner == "ACME LLC"
+    assert idx.lookup("12 STINCHCOMB DRIVE APT 7", "43202").owner == "DOE JANE"
+    # a street whose NAME starts with a street-type word is not truncated
+    assert parcels.street_key("123 ST CLAIR AVE") == "123 ST CLAIR AVE"
+
+
+def test_zip_typo_or_blank_parcel_zip_matches_only_when_unambiguous(tmp_path):
+    rows = ["ACME LLC,1955 HOPKINS AVE,43223,PO BOX 5,SCOTTSDALE AZ 85251",       # court says 43123 (typo)
+            "DOE JANE,77 ELM ST,,1 X ST,DAYTON OH 45402",                          # parcel has blank ZIP
+            "ONE OWNER,9 OAK ST,43001,1 X ST,A OH 43001",                          # same house#/street in two cities,
+            "OTHER OWNER,9 OAK ST,43002,2 Y ST,B OH 43002"]                        # different owners -> ambiguous
+    idx = _index(tmp_path, rows, {("1955 HOPKINS AVE", "43123"), ("77 ELM ST", "43201"), ("9 OAK ST", "43003")})
+    assert idx.lookup("1955 HOPKINS AVE", "43123").owner == "ACME LLC"
+    assert idx.lookup("77 ELM ST", "43201").owner == "DOE JANE"
+    assert idx.lookup("9 OAK ST", "43003") is None

@@ -39,6 +39,9 @@ PARCEL_ID_COLUMNS = ("PARCEL ID", "PARCELID", "PARCEL_ID", "PARCELNO", "PARCEL N
 _PUNCT = re.compile(r"[^A-Z0-9 ]")
 _SPACE = re.compile(r"\s+")
 _UNIT = re.compile(r"\s+(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|LOT|RM|ROOM|FL|FLOOR)\b.*$|\s+#.*$")
+_UNIT_TOKEN = re.compile(r"\d+[A-Z]?|[A-Z]")           # '1234', '12A', 'A'
+_STREET_TYPES = {"ST", "AVE", "RD", "DR", "LN", "CT", "BLVD", "PL", "CIR", "PKWY", "TER", "HWY", "TRL", "WAY",
+                 "SQ", "ALY", "CROSSING", "XING", "COVE", "PATH", "WALK", "PIKE", "ROW", "LOOP", "PLZ", "PLAZA"}
 _DIRECTION = re.compile(r"\b(N|S|E|W|NE|NW|SE|SW|NORTH|SOUTH|EAST|WEST)\b")
 
 _SUFFIXES = {
@@ -65,6 +68,14 @@ def _street_tokens(street: str) -> str:
         t = _DIR_WORDS.get(t, t)
         t = _SUFFIXES.get(t, t)
         toks.append(t)
+    # Condo/apartment parcels carry the unit glued on without a keyword: 'GULLEDGE RD 1234',
+    # 'STINCHCOMB DR 12-A 34'. Drop unit-like tokens that follow the street-type word.
+    for i in range(2, len(toks)):
+        if toks[i] in _STREET_TYPES:
+            tail = toks[i + 1:]
+            if tail and all(_UNIT_TOKEN.fullmatch(t) for t in tail):
+                toks = toks[: i + 1]
+            break
     return " ".join(toks)
 
 
@@ -81,6 +92,11 @@ def address_keys(street: str, zipcode: str) -> tuple[str, str]:
 def mask_number(addr: str) -> str:
     """Hide house/unit digits for logs (CI logs of a public repo are public): '1955 HOPKINS AVE' -> '#### HOPKINS AVE'."""
     return re.sub(r"\d", "#", addr or "")
+
+
+def street_key(street: str) -> str:
+    """House number + street name + type, no ZIP (used for the unique-countywide fallback)."""
+    return _street_tokens(street)
 
 
 def street_of(full_address: str) -> str:
@@ -259,19 +275,26 @@ class Parcel:
 class ParcelIndex:
     by_exact: dict[str, Parcel] = field(default_factory=dict)
     by_nodir: dict[str, Parcel] = field(default_factory=dict)
+    by_street: dict[str, list] = field(default_factory=dict)  # ZIP-agnostic; only used when unique countywide
     owner_counts: Counter = field(default_factory=Counter)   # normalized owner -> parcels countywide
     rows_read: int = 0
     source: str = ""
     samples: list[str] = field(default_factory=list)          # first few site addresses, for the run log
 
     def __bool__(self) -> bool:
-        return bool(self.by_exact or self.by_nodir)
+        return bool(self.by_exact or self.by_nodir or self.by_street)
 
     def lookup(self, street: str, zipcode: str) -> Parcel | None:
         k1, k2 = address_keys(street, zipcode)
-        if not k1:
-            return None
-        return self.by_exact.get(k1) or self.by_nodir.get(k2)
+        hit = self.by_exact.get(k1) or self.by_nodir.get(k2)
+        if hit:
+            return hit
+        # Fallback for ZIP typos / parcels with a blank ZIP: accept a house#+street match only when every
+        # parcel at that address belongs to the same owner (so a duplicate street in another city can't mislead).
+        cands = self.by_street.get(street_key(street), [])
+        if cands and len({normalize_owner(c.owner) for c in cands}) == 1:
+            return cands[0]
+        return None
 
     def portfolio(self, owner: str) -> int:
         return self.owner_counts.get(normalize_owner(owner), 0)
@@ -282,11 +305,15 @@ def build_index(csv_path: Path, wanted: set[tuple[str, str]]) -> ParcelIndex:
     in memory; owner portfolio counts are tallied for every parcel in the county."""
     wanted_exact: set[str] = set()
     wanted_nodir: set[str] = set()
+    wanted_street: set[str] = set()
     for street, z in wanted:
         k1, k2 = address_keys(street, z)
         if k1:
             wanted_exact.add(k1)
             wanted_nodir.add(k2)
+        sk = street_key(street)
+        if sk:
+            wanted_street.add(sk)
 
     idx = ParcelIndex()
     with Path(csv_path).open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
@@ -309,10 +336,10 @@ def build_index(csv_path: Path, wanted: set[tuple[str, str]]) -> ParcelIndex:
             if len(idx.samples) < 5:
                 idx.samples.append(f"{site} | {_get_field(row, SITE_ZIP_COLUMNS)}")
             k1, k2 = address_keys(site, _get_field(row, SITE_ZIP_COLUMNS))
-            if not k1:
-                continue
-            hit_exact, hit_nodir = k1 in wanted_exact, k2 in wanted_nodir
-            if not (hit_exact or hit_nodir):
+            sk = street_key(site)
+            hit_exact, hit_nodir = bool(k1) and k1 in wanted_exact, bool(k2) and k2 in wanted_nodir
+            hit_street = sk in wanted_street
+            if not (hit_exact or hit_nodir or hit_street):
                 continue
             city, state, z = split_city_state_zip(_get_field(row, MAIL_CSZ_COLUMNS))
             parcel = Parcel(
@@ -324,6 +351,8 @@ def build_index(csv_path: Path, wanted: set[tuple[str, str]]) -> ParcelIndex:
                 idx.by_exact.setdefault(k1, parcel)
             if hit_nodir:
                 idx.by_nodir.setdefault(k2, parcel)
+            if hit_street:
+                idx.by_street.setdefault(sk, []).append(parcel)
     return idx
 
 
