@@ -78,6 +78,11 @@ def address_keys(street: str, zipcode: str) -> tuple[str, str]:
     return f"{base}|{z}", f"{nodir}|{z}"
 
 
+def mask_number(addr: str) -> str:
+    """Hide house/unit digits for logs (CI logs of a public repo are public): '1955 HOPKINS AVE' -> '#### HOPKINS AVE'."""
+    return re.sub(r"\d", "#", addr or "")
+
+
 def street_of(full_address: str) -> str:
     """'9 OAK ST APT 2, COLUMBUS, OH 43201' -> '9 OAK ST APT 2' (everything before the first comma)."""
     return (full_address or "").split(",")[0].strip()
@@ -366,7 +371,7 @@ def enrich_filings(filings: list, index: ParcelIndex) -> dict:
             f.parcel_status = "unmatched"
             stats["unmatched"] += 1
             if len(unmatched_samples) < 8:
-                unmatched_samples.append(f"{street_of(f.property_address)} | {f.property_zip}")
+                unmatched_samples.append(f"{mask_number(street_of(f.property_address))} | {f.property_zip}")
             continue
         stats["matched"] += 1
         f.parcel_owner = parcel.owner

@@ -49,6 +49,10 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: python run_pipeline.py
 
+      - name: Diagnose parcel matching (counts and masked examples only)
+        continue-on-error: true
+        run: python diagnose_parcels.py
+
       - name: Commit data
         run: |
           git config user.name "eviction-lead-bot"
