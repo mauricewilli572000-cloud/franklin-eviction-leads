@@ -147,13 +147,18 @@ def find_parcel_csv_url(session: requests.Session) -> str:
     if override:
         return override
     base = config.PARCEL_CSV_INDEX_URL
-    years = sorted((e for e in _list_entries(session, base) if re.fullmatch(r"\d{4}", e)), reverse=True)
+    root = _list_entries(session, base)
+    print(f"[parcels] index entries: {root[:40]}")
+    years = sorted((e for e in root if re.fullmatch(r"\d{4}", e)), reverse=True)
     checked = 0
     for year in years[:3]:
-        months = [e for e in _list_entries(session, f"{base}{year}/") if re.fullmatch(r"\d{1,2}", e)]
+        entries = _list_entries(session, f"{base}{year}/")
+        months = [e for e in entries if re.fullmatch(r"\d{1,2}", e)]
+        print(f"[parcels] {year}: entries={entries[:40]}")
         for month in sorted(months, key=int, reverse=True):
             checked += 1
             files = _list_entries(session, f"{base}{year}/{month}/")
+            print(f"[parcels] {year}/{month}: files={files[:20]}")
             for f in files:
                 if f.lower() == "parcel.csv":
                     return f"{base}{year}/{month}/{f}"
