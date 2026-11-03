@@ -44,10 +44,6 @@ jobs:
       # A fresh runner has no cached CSVs, so all 13 months are downloaded every night
       # (dispositions on older months stay current). If the Clerk ever blocks GitHub's
       # servers, CSVs placed in manual_csv/ are used instead.
-      - name: Recon - where does the Auditor publish current parcel data?
-        continue-on-error: true
-        run: python discover_parcels.py
-
       - name: Run pipeline
         env:
           PYTHONUNBUFFERED: "1"

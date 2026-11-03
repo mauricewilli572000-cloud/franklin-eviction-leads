@@ -78,6 +78,7 @@ def isolated_data(tmp_path, monkeypatch):
     def _offline_load(wanted, csv_path=None):          # never touch the network in tests
         return _real_load(wanted, csv_path) if csv_path else parcels.ParcelIndex()
 
+    monkeypatch.setattr(parcels, "_real_load_index", _real_load, raising=False)   # for tests that exercise it
     monkeypatch.setattr(parcels, "load_index", _offline_load)
     monkeypatch.setattr(config, "MIN_FILINGS_FOR_LEAD", 2)
 
@@ -426,3 +427,62 @@ def test_stale_leads_are_pruned_between_runs(csv_dir, monkeypatch):
     assert run_pipeline.main(["--from-dir", str(csv_dir), "--today", "2026-11-01"]) == 0
     ids = {r["lead_id"] for r in json.loads(config.RECORDS_JSON.read_text())["records"]}
     assert "ghost000000" not in ids and len(ids) == len(first["records"]) - 1
+
+
+class _FakeGis:
+    """Minimal stand-in for the county ArcGIS layer: serves OBJECTID-ordered pages."""
+    def __init__(self, rows):
+        self.rows, self.calls = rows, 0
+
+    def get(self, url, params=None, timeout=None):
+        self.calls += 1
+        last = int(params["where"].split(">")[1])
+        page = [r for r in self.rows if r["OBJECTID"] > last][:2]          # page size 2
+        class R:
+            def raise_for_status(self): pass
+            def json(self_inner): return {"features": [{"attributes": a} for a in page]}
+        return R()
+
+
+GIS_ROWS = [
+    {"OBJECTID": 1, "PARCELID": "010-1", "SITEADDRESS": "101 OAK ST", "ZIPCD": "43201", "OWNERNME1": "ACME HOLDINGS LLC",
+     "PSTLADDRES": "PO BOX 5", "PSTLCITYSTZIP": "SCOTTSDALE AZ 85251", "SALEDATE": 1700000000000},
+    {"OBJECTID": 2, "PARCELID": "010-2", "SITEADDRESS": "55 PINE AVE", "ZIPCD": "43206", "OWNERNME1": "ACME HOLDINGS LLC",
+     "PSTLADDRES": "PO BOX 5", "PSTLCITYSTZIP": "SCOTTSDALE AZ 85251", "SALEDATE": 1790000000000},
+    {"OBJECTID": 3, "PARCELID": "010-3", "SITEADDRESS": "9 MAPLE DR", "ZIPCD": "43211", "OWNERNME1": "DOE JANE",
+     "PSTLADDRES": "44 ELM ST", "PSTLCITYSTZIP": "DAYTON OH 45402", "SALEDATE": None},
+]
+
+
+def test_gis_download_pages_and_feeds_index(monkeypatch):
+    import parcels
+    monkeypatch.setattr(config, "CACHE_DIR", config.DATA_DIR / "cache")
+    monkeypatch.setattr(config, "PARCEL_GIS_MIN_ROWS", 1)
+    fake = _FakeGis(GIS_ROWS)
+    path, asof = parcels.download_gis_parcels(fake, url="http://x")
+    assert fake.calls == 3                      # 2 + 1 rows, then an empty page ends the loop
+    assert asof == "2026-09-21"                 # newest SALEDATE, epoch ms -> date
+    idx = parcels.build_index(path, {("101 OAK ST", "43201")})
+    p = idx.lookup("101 OAK ST", "43201")
+    assert p.owner == "ACME HOLDINGS LLC" and p.mail_state == "AZ" and p.mail_zip == "85251"
+    assert idx.portfolio("ACME HOLDINGS LLC") == 2
+
+
+def test_gis_partial_download_is_rejected(monkeypatch):
+    import parcels
+    monkeypatch.setattr(config, "CACHE_DIR", config.DATA_DIR / "cache")
+    with pytest.raises(RuntimeError, match="partial"):
+        parcels.download_gis_parcels(_FakeGis(GIS_ROWS), url="http://x")      # 3 rows < 100,000
+
+
+def test_load_index_falls_back_to_auditor_csv_when_gis_is_down(monkeypatch, tmp_path):
+    import parcels
+    old = tmp_path / "Parcel.csv"
+    old.write_text("NAME1,STADDR,ZIPCODE,MAILAD3,MAILAD4\nACME LLC,101 OAK ST,43201,PO BOX 5,SCOTTSDALE AZ 85251\n")
+    def boom(*a, **k): raise RuntimeError("503")
+    monkeypatch.setattr(parcels, "download_gis_parcels", boom)
+    monkeypatch.setattr(parcels, "find_parcel_csv_url", lambda s: "http://old")
+    monkeypatch.setattr(parcels, "download_parcel_csv", lambda s, u: old)
+    idx = parcels._real_load_index({("101 OAK ST", "43201")})
+    assert idx and "Auditor" in idx.source and idx.lookup("101 OAK ST", "43201").owner == "ACME LLC"
+

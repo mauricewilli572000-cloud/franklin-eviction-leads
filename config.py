@@ -96,5 +96,10 @@ HEADER_OVERRIDES: dict = {}
 
 # --- Auditor owner matching (parcels.py) -------------------------------------
 PARCEL_CSV_INDEX_URL = "https://apps.franklincountyauditor.com/Parcel_CSV/"
+# Live county tax-parcel service (updated daily; the Auditor's Parcel_CSV folder stops at 2025-07).
+PARCEL_GIS_URL = "https://gis.franklincountyohio.gov/hosting/rest/services/ParcelFeatures/Parcel_Features/MapServer/0"
+PARCEL_GIS_PAGE = 3000           # service maxRecordCount
+PARCEL_GIS_MIN_ROWS = 100_000    # a smaller result means a partial/failed download
+PARCEL_GIS_MAX_PAGES = 400       # safety stop (~495k parcels / 3000 = ~165 pages)
 PARCEL_CSV_URL = None            # set (or env PARCEL_CSV_URL) to skip folder discovery
 PORTFOLIO_INSTITUTIONAL = 150    # owner holds >= this many parcels countywide -> institutional, dropped

@@ -12,7 +12,7 @@ first defendant + most recent address.
 4. `exporters.py` — accumulates `data/eviction_records.json` (merge by lead_id), holds address-less leads in `data/eviction_pending_records.json` (retried each run), writes `dashboard/evictions.json` + `dashboard/evictions_ghl_export.csv` (GoHighLevel upload) — same decisions as the foreclosure scrapers.
 
 ## Owner matching (Auditor)
-`parcels.py` downloads the Auditor's monthly `Parcel.csv` (public, ~100 MB; discovered automatically, override with env `PARCEL_CSV_URL`)
+`parcels.py` pulls owner data from the county's **live** tax-parcel service (ArcGIS, ~495k parcels, updated daily; the Auditor's `Parcel_CSV` folder stopped at July 2025). If that service is down it falls back to the Auditor's `Parcel.csv` (override with env `PARCEL_CSV_URL`)
 and matches each rental (the defendant's address) to its parcel:
 - **verified** - the plaintiff is the owner of record; the Auditor's tax-mailing address replaces the court's (kept as "Court Mailing Address").
 - **via manager** - a property manager filed; the lead becomes the owner of record + their mailing address (manager kept in "Via Manager").

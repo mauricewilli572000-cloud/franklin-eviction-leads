@@ -179,6 +179,65 @@ def download_parcel_csv(session: requests.Session, url: str) -> Path:
     return dest
 
 
+GIS_FIELDS = ("OBJECTID", "PARCELID", "SITEADDRESS", "ZIPCD", "OWNERNME1", "PSTLADDRES", "PSTLCITYSTZIP", "SALEDATE")
+GIS_CSV_HEADER = ["PARCEL ID", "NAME1", "STADDR", "ZIPCODE", "MAILAD3", "MAILAD4"]   # same names as the old Parcel.csv
+
+
+def _gis_page(session: requests.Session, url: str, last_oid: int) -> dict:
+    params = {
+        "where": f"OBJECTID>{last_oid}", "outFields": ",".join(GIS_FIELDS), "returnGeometry": "false",
+        "orderByFields": "OBJECTID", "resultRecordCount": config.PARCEL_GIS_PAGE, "f": "json",
+    }
+    last_exc: Exception | None = None
+    for attempt in range(1, config.MAX_RETRIES + 1):
+        try:
+            resp = session.get(f"{url}/query", params=params, timeout=(config.REQUEST_TIMEOUT, 180))
+            resp.raise_for_status()
+            data = resp.json()
+            if "error" in data:
+                raise RuntimeError(f"ArcGIS error: {data['error']}")
+            return data
+        except Exception as exc:  # noqa: BLE001 - retried, then re-raised
+            last_exc = exc
+            time.sleep(2 * attempt)
+    raise RuntimeError(f"parcel service page after OBJECTID {last_oid} failed: {last_exc}")
+
+
+def download_gis_parcels(session: requests.Session, url: str | None = None) -> tuple[Path, str]:
+    """Page through the county's LIVE tax-parcel layer and write a CSV that uses the old Parcel.csv
+    column names, so build_index() works unchanged. Returns (csv_path, newest_sale_date_iso)."""
+    from datetime import datetime, timezone
+
+    url = url or config.PARCEL_GIS_URL
+    config.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    dest = config.CACHE_DIR / "Parcel_gis.csv"
+    t0, last_oid, rows, newest_sale = time.time(), 0, 0, 0
+    with dest.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(GIS_CSV_HEADER)
+        for page in range(config.PARCEL_GIS_MAX_PAGES):
+            data = _gis_page(session, url, last_oid)
+            feats = data.get("features") or []
+            if not feats:
+                break
+            for f in feats:
+                a = f.get("attributes") or {}
+                last_oid = max(last_oid, int(a.get("OBJECTID") or 0))
+                newest_sale = max(newest_sale, int(a.get("SALEDATE") or 0))
+                w.writerow([a.get("PARCELID") or "", a.get("OWNERNME1") or "", a.get("SITEADDRESS") or "",
+                            a.get("ZIPCD") or "", a.get("PSTLADDRES") or "", a.get("PSTLCITYSTZIP") or ""])
+                rows += 1
+            time.sleep(0.1)
+        else:
+            raise RuntimeError(f"parcel service paging did not finish within {config.PARCEL_GIS_MAX_PAGES} pages")
+    if rows < config.PARCEL_GIS_MIN_ROWS:   # county has ~495k parcels
+        raise RuntimeError(f"parcel service returned only {rows:,} rows - refusing to use a partial download")
+    asof = (datetime.fromtimestamp(newest_sale / 1000, timezone.utc).date().isoformat() if newest_sale else "?")
+    print(f"[parcels] downloaded {rows:,} parcels from county GIS in {time.time() - t0:.0f}s "
+          f"(newest sale on file: {asof})")
+    return dest, asof
+
+
 # --------------------------------------------------------------------------- index
 @dataclass
 class Parcel:
@@ -197,6 +256,7 @@ class ParcelIndex:
     by_nodir: dict[str, Parcel] = field(default_factory=dict)
     owner_counts: Counter = field(default_factory=Counter)   # normalized owner -> parcels countywide
     rows_read: int = 0
+    source: str = ""
     samples: list[str] = field(default_factory=list)          # first few site addresses, for the run log
 
     def __bool__(self) -> bool:
@@ -263,20 +323,29 @@ def build_index(csv_path: Path, wanted: set[tuple[str, str]]) -> ParcelIndex:
 
 
 def load_index(wanted: set[tuple[str, str]], csv_path: Path | None = None) -> ParcelIndex:
-    """Download (unless csv_path is given) and index the Auditor file. Never raises: if the Auditor
-    is unreachable the pipeline simply runs without owner verification."""
+    """Index county parcel data. Order: a local file if given; else the LIVE county GIS service; else the
+    Auditor's (older) Parcel.csv. Never raises: with no parcel source the pipeline runs unenriched."""
+    session = requests.Session()
+    session.headers.update({"User-Agent": config.USER_AGENT})
+    source = "local file"
     try:
         if csv_path is None:
-            session = requests.Session()
-            session.headers.update({"User-Agent": config.USER_AGENT})
-            csv_path = download_parcel_csv(session, find_parcel_csv_url(session))
+            try:
+                csv_path, asof = download_gis_parcels(session)
+                source = f"county GIS (live, newest sale {asof})"
+            except Exception as exc:  # noqa: BLE001
+                print(f"[parcels] WARN live county GIS unavailable ({exc}); falling back to Auditor Parcel.csv")
+                csv_path = download_parcel_csv(session, find_parcel_csv_url(session))
+                source = "Auditor Parcel.csv (may be months old)"
         idx = build_index(csv_path, wanted)
+        idx.source = source
+        print(f"[parcels] source: {source}")
         print(f"[parcels] site-address samples (street | zip): {idx.samples}")
         print(f"[parcels] {idx.rows_read:,} parcels read; {len(idx.owner_counts):,} distinct owners; "
               f"{len(idx.by_exact):,} rental addresses matched exactly (+{len(idx.by_nodir):,} loose)")
         return idx
     except Exception as exc:  # noqa: BLE001 - enrichment is optional
-        print(f"[parcels] WARN Auditor enrichment unavailable: {exc}")
+        print(f"[parcels] WARN owner enrichment unavailable: {exc}")
         return ParcelIndex()
 
 
