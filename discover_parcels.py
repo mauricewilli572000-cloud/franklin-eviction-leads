@@ -62,6 +62,42 @@ def probe_rest(s: requests.Session) -> None:
                 print(f"[recon]   svc {name} ERROR {exc}")
 
 
+LAYERS = [
+    "https://maps.hilliardohio.gov/arcgis/rest/services/Reference/Franklin_County_Auditor/MapServer/0",
+    "https://gis.franklincountyohio.gov/hosting/rest/services/ParcelFeatures/Parcel_Features/MapServer/0",
+    "https://gis.franklincountyohio.gov/hosting/rest/services/ParcelFeatures/TaxParcel_EDP/MapServer/0",
+    "https://gis.franklincountyohio.gov/hosting/rest/services/TaxParcel_CombosSplitsSubsCondos/MapServer/0",
+]
+
+
+def probe_freshness(s: requests.Session) -> None:
+    """Field names, count and the NEWEST value of every date field (no personal data printed)."""
+    import datetime as dt
+    for url in LAYERS:
+        try:
+            lj = s.get(url, params={"f": "json"}, timeout=45).json()
+            fields = lj.get("fields", [])
+            names = [f["name"] for f in fields]
+            cnt = s.get(f"{url}/query", params={"where": "1=1", "returnCountOnly": "true", "f": "json"}, timeout=60).json()
+            print(f"[recon] LAYER {url} name={lj.get('name')!r} count={cnt} maxRecordCount={lj.get('maxRecordCount')}")
+            print(f"[recon]   has owner/mail/sale fields: {[n for n in names if re.search('own|mail|pstl|sale|rental|site|addr', n, re.I)]}")
+            print(f"[recon]   ALL fields ({len(names)}): {names[:70]}")
+            for f in fields:
+                if f.get("type") != "esriFieldTypeDate":
+                    continue
+                stats = [{"statisticType": "max", "onStatisticField": f["name"], "outStatisticFieldName": "mx"}]
+                r = s.get(f"{url}/query", params={"where": "1=1", "outStatistics": str(stats).replace("'", '"'),
+                                                  "f": "json"}, timeout=60).json()
+                try:
+                    ms = r["features"][0]["attributes"]["mx"]
+                    when = dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).date().isoformat() if ms else None
+                except Exception:  # noqa: BLE001
+                    when = f"? {str(r)[:120]}"
+                print(f"[recon]   newest {f['name']}: {when}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[recon] LAYER {url} ERROR {exc}")
+
+
 def main() -> int:
     s = requests.Session()
     s.headers["User-Agent"] = "Mozilla/5.0 (compatible; FranklinLeadsRecon/1.0)"
@@ -88,6 +124,7 @@ def main() -> int:
             if len(seen) >= 60:
                 break
     probe_rest(s)
+    probe_freshness(s)
     return 0
 
 
