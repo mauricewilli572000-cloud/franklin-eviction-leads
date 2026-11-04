@@ -515,3 +515,10 @@ def test_zip_typo_or_blank_parcel_zip_matches_only_when_unambiguous(tmp_path):
     assert idx.lookup("1955 HOPKINS AVE", "43123").owner == "ACME LLC"
     assert idx.lookup("77 ELM ST", "43201").owner == "DOE JANE"
     assert idx.lookup("9 OAK ST", "43003") is None
+
+
+def test_county_street_type_spellings_normalize():
+    import parcels
+    assert parcels.street_key("5 ROCKY FORK BL") == parcels.street_key("5 ROCKY FORK BOULEVARD")
+    assert parcels.street_key("9 TRINDEL WY") == parcels.street_key("9 TRINDEL WAY")
+

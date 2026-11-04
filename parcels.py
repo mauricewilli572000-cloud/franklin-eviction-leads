@@ -39,6 +39,7 @@ PARCEL_ID_COLUMNS = ("PARCEL ID", "PARCELID", "PARCEL_ID", "PARCELNO", "PARCEL N
 _PUNCT = re.compile(r"[^A-Z0-9 ]")
 _SPACE = re.compile(r"\s+")
 _UNIT = re.compile(r"\s+(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|LOT|RM|ROOM|FL|FLOOR)\b.*$|\s+#.*$")
+_PARCEL_ABBREV = {"BL": "BLVD", "WY": "WAY", "PY": "PKWY", "CRT": "CT", "TRCE": "TRCE"}   # county-file spellings
 _UNIT_TOKEN = re.compile(r"\d+[A-Z]?|[A-Z]")           # '1234', '12A', 'A'
 _STREET_TYPES = {"ST", "AVE", "RD", "DR", "LN", "CT", "BLVD", "PL", "CIR", "PKWY", "TER", "HWY", "TRL", "WAY",
                  "SQ", "ALY", "CROSSING", "XING", "COVE", "PATH", "WALK", "PIKE", "ROW", "LOOP", "PLZ", "PLAZA"}
@@ -67,6 +68,7 @@ def _street_tokens(street: str) -> str:
     for t in s.split():
         t = _DIR_WORDS.get(t, t)
         t = _SUFFIXES.get(t, t)
+        t = _PARCEL_ABBREV.get(t, t)
         toks.append(t)
     # Condo/apartment parcels carry the unit glued on without a keyword: 'GULLEDGE RD 1234',
     # 'STINCHCOMB DR 12-A 34'. Drop unit-like tokens that follow the street-type word.
