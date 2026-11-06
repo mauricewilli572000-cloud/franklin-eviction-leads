@@ -574,3 +574,24 @@ def test_gis_csv_carries_sale_date(monkeypatch):
     idx = parcels.build_index(path, {("55 PINE AVE", "43206"), ("9 MAPLE DR", "43211")})
     assert idx.lookup("55 PINE AVE", "43206").sale_date.isoformat() == "2026-09-21"
     assert idx.lookup("9 MAPLE DR", "43211").sale_date is None
+
+
+def test_parcels_matched_counts_addresses_not_filings():
+    from datetime import date
+    ff = _filings("ACME HOLDINGS LLC", ["1 OAK ST, COLUMBUS, OH 43232"] * 3 + ["2 ELM AVE, COLUMBUS, OH 43232"] * 2)
+    for f in ff:
+        f.parcel_status = "confirmed"
+    out = landlord_leads.aggregate(ff, today=date(2026, 11, 3))[0]
+    assert out.n_properties == 2 and out.parcels_matched == 2     # was 5 (filings)
+
+
+def test_partial_sale_does_not_label_landlord_as_exited():
+    from datetime import date
+    streets = ["OAK ST", "ELM AVE", "PINE RD", "MAPLE DR", "CEDAR LN", "BIRCH CT", "ASH WAY"]
+    ff = _filings("ACME HOLDINGS LLC", [f"{10 + i} {st}, COLUMBUS, OH 43232" for i, st in enumerate(streets)])
+    for f in ff[:3]:
+        f.parcel_status = "sold"
+    for f in ff[3:]:
+        f.parcel_status = "confirmed"
+    out = landlord_leads.aggregate(ff, today=date(2026, 11, 3))[0]
+    assert out.sold_since == 3 and out.verification == "verified"

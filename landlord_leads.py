@@ -178,20 +178,23 @@ def _compute(ll: Landlord, today: date) -> None:
 
     # Auditor owner verification (parcels.enrich_filings) -------------------------------------
     st = Counter(f.parcel_status for f in ll.filings if f.parcel_status)
-    ll.parcels_matched = st["confirmed"] + st["mismatch"] + st["via_manager"] + st["sold"]
+    # distinct rental ADDRESSES matched to a parcel (same unit as property_count, so "7 of 9" always makes sense)
+    ll.parcels_matched = len({f.property_address for f in ll.filings
+                              if f.parcel_status in ("confirmed", "mismatch", "via_manager", "sold")})
     kept = {f.property_address for f in ll.filings if f.parcel_status in ("confirmed", "via_manager")}
     ll.sold_since = len({f.property_address for f in ll.filings if f.parcel_status == "sold"} - kept)
     ll.portfolio = max((f.owner_portfolio for f in ll.filings), default=0)
     ll.via_managers = sorted({f.via_manager for f in ll.filings if f.via_manager})
     ll.court_mailing = next((f.court_mailing for f in newest_first if f.court_mailing), "")
+    sold_majority = bool(ll.sold_since) and ll.sold_since / max(ll.parcels_matched, 1) >= 0.5
     if not st:
         ll.verification = ""
+    elif sold_majority:
+        ll.verification = "sold since filing"
     elif st["via_manager"] and st["via_manager"] >= st["confirmed"] + st["mismatch"] + st["sold"]:
         ll.verification = "via manager"
     elif st["confirmed"] and st["confirmed"] >= st["mismatch"] + st["sold"]:
         ll.verification = "verified"
-    elif st["sold"] and st["sold"] >= st["mismatch"]:
-        ll.verification = "sold since filing"
     elif st["mismatch"] or st["sold"]:
         ll.verification = "plaintiff not owner of record"
     else:
@@ -286,7 +289,7 @@ def _score(ll: Landlord, today: date) -> None:
         sig.append("plaintiff is not the owner of record - verify before outreach")
     exited = False
     if ll.sold_since:
-        exited = ll.sold_since / max(ll.parcels_matched, 1) >= 0.5
+        exited = ll.verification == "sold since filing"
         sig.append(f"{ll.sold_since} of {ll.parcels_matched} matched rentals sold since the eviction filing"
                    + (" - landlord may have exited" if exited else ""))
         if exited:
