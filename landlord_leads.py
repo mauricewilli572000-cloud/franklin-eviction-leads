@@ -179,10 +179,12 @@ def _compute(ll: Landlord, today: date) -> None:
     # Auditor owner verification (parcels.enrich_filings) -------------------------------------
     st = Counter(f.parcel_status for f in ll.filings if f.parcel_status)
     # distinct rental ADDRESSES matched to a parcel (same unit as property_count, so "7 of 9" always makes sense)
-    ll.parcels_matched = len({f.property_address for f in ll.filings
-                              if f.parcel_status in ("confirmed", "mismatch", "via_manager", "sold")})
-    kept = {f.property_address for f in ll.filings if f.parcel_status in ("confirmed", "via_manager")}
-    ll.sold_since = len({f.property_address for f in ll.filings if f.parcel_status == "sold"} - kept)
+    # (same address key as n_properties, so counts are always comparable)
+    def _addrs(*statuses):
+        return {normalize_street(f.property_address) for f in ll.filings
+                if f.property_address and f.parcel_status in statuses}
+    ll.parcels_matched = len(_addrs("confirmed", "mismatch", "via_manager", "sold"))
+    ll.sold_since = len(_addrs("sold") - _addrs("confirmed", "via_manager"))
     ll.portfolio = max((f.owner_portfolio for f in ll.filings), default=0)
     ll.via_managers = sorted({f.via_manager for f in ll.filings if f.via_manager})
     ll.court_mailing = next((f.court_mailing for f in newest_first if f.court_mailing), "")

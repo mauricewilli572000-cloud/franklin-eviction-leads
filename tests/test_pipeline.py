@@ -595,3 +595,13 @@ def test_partial_sale_does_not_label_landlord_as_exited():
         f.parcel_status = "confirmed"
     out = landlord_leads.aggregate(ff, today=date(2026, 11, 3))[0]
     assert out.sold_since == 3 and out.verification == "verified"
+
+
+def test_matched_never_exceeds_rentals_when_addresses_differ_by_case_or_unit():
+    from datetime import date
+    ff = _filings("ACME HOLDINGS LLC", ["12 Oak St, COLUMBUS, OH 43232", "12 OAK ST APT 2, COLUMBUS, OH 43232",
+                                         "12 Oak St Apt 5, COLUMBUS, OH 43232", "9 Elm Ave, COLUMBUS, OH 43232"])
+    for f in ff:
+        f.parcel_status = "confirmed"
+    out = landlord_leads.aggregate(ff, today=date(2026, 11, 3))[0]
+    assert out.parcels_matched <= out.n_properties
