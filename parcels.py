@@ -34,6 +34,7 @@ SITE_ADDR_COLUMNS = ("STADDR", "SITE_ADDR", "SITEADDR", "SITE_ADDRE", "PROPADDR"
 SITE_ZIP_COLUMNS = ("ZIPCODE", "SITE_ZIP", "SITEZIP", "PROPZIP", "SITEZIPCODE")
 MAIL_STREET_COLUMNS = ("MAILAD3", "OWNER_ADD1", "ADDR_1", "MAILADR1", "MAIL_ADDR1", "MAILADDR")
 MAIL_CSZ_COLUMNS = ("MAILAD4", "OWNER_ADD2")
+SALE_DATE_COLUMNS = ("SALEDATE", "SALE DATE", "SALE_DATE", "TRANSFER DATE", "TRANSFERDATE")
 PARCEL_ID_COLUMNS = ("PARCEL ID", "PARCELID", "PARCEL_ID", "PARCELNO", "PARCEL NO")
 
 _PUNCT = re.compile(r"[^A-Z0-9 ]")
@@ -112,6 +113,18 @@ _ENTITY_STOP = {
     "TRUSTEES", "ET", "AL", "ETAL", "UX", "ESTATE", "JR", "SR", "II", "III", "IV", "COMPANY", "CORPORATION",
     "FBO", "TR", "LIFE", "EST", "REVOCABLE", "LIVING", "FAMILY", "TIC",
 }
+
+
+def parse_date(text: str):
+    """ISO or US-style date text -> date, else None."""
+    from datetime import datetime
+    t = (text or "").strip()[:10]
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"):
+        try:
+            return datetime.strptime(t, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 def normalize_owner(name: str) -> str:
@@ -203,7 +216,7 @@ def download_parcel_csv(session: requests.Session, url: str) -> Path:
 
 
 GIS_FIELDS = ("OBJECTID", "PARCELID", "SITEADDRESS", "ZIPCD", "OWNERNME1", "PSTLADDRES", "PSTLCITYSTZIP", "SALEDATE")
-GIS_CSV_HEADER = ["PARCEL ID", "NAME1", "STADDR", "ZIPCODE", "MAILAD3", "MAILAD4"]   # same names as the old Parcel.csv
+GIS_CSV_HEADER = ["PARCEL ID", "NAME1", "STADDR", "ZIPCODE", "MAILAD3", "MAILAD4", "SALEDATE"]   # same names as the old Parcel.csv
 
 
 def _gis_page(session: requests.Session, url: str, last_oid: int) -> dict:
@@ -247,8 +260,10 @@ def download_gis_parcels(session: requests.Session, url: str | None = None) -> t
                 a = f.get("attributes") or {}
                 last_oid = max(last_oid, int(a.get("OBJECTID") or 0))
                 newest_sale = max(newest_sale, int(a.get("SALEDATE") or 0))
+                sale = a.get("SALEDATE")
+                sale_iso = (datetime.fromtimestamp(int(sale) / 1000, timezone.utc).date().isoformat() if sale else "")
                 w.writerow([a.get("PARCELID") or "", a.get("OWNERNME1") or "", a.get("SITEADDRESS") or "",
-                            a.get("ZIPCD") or "", a.get("PSTLADDRES") or "", a.get("PSTLCITYSTZIP") or ""])
+                            a.get("ZIPCD") or "", a.get("PSTLADDRES") or "", a.get("PSTLCITYSTZIP") or "", sale_iso])
                 rows += 1
             time.sleep(0.1)
         else:
@@ -271,6 +286,7 @@ class Parcel:
     mail_city: str
     mail_state: str
     mail_zip: str
+    sale_date: object = None          # date of the parcel's last recorded sale/transfer, if known
 
 
 @dataclass
@@ -348,6 +364,7 @@ def build_index(csv_path: Path, wanted: set[tuple[str, str]]) -> ParcelIndex:
                 parcel_id=_get_field(row, PARCEL_ID_COLUMNS), owner=owner, site_street=site,
                 mail_street=_get_field(row, MAIL_STREET_COLUMNS), mail_city=city,
                 mail_state=state or "OH", mail_zip=z,
+                sale_date=parse_date(_get_field(row, SALE_DATE_COLUMNS)),
             )
             if hit_exact:
                 idx.by_exact.setdefault(k1, parcel)
@@ -418,6 +435,15 @@ def enrich_filings(filings: list, index: ParcelIndex) -> dict:
                                                         f"{f.plaintiff_state} {f.plaintiff_zip}".strip()) if x)
                 f.plaintiff_street, f.plaintiff_city, f.plaintiff_state, f.plaintiff_zip = (
                     parcel.mail_street, parcel.mail_city, parcel.mail_state, zip5(parcel.mail_zip))
+            continue
+
+        if parcel.sale_date and f.file_date and parcel.sale_date > f.file_date:
+            # Sold after this eviction was filed: the owner of record is the BUYER, not the landlord who
+            # filed. Do not credit the buyer's name, mailing address or portfolio to this lead.
+            f.parcel_status = "sold"
+            f.sold_on = parcel.sale_date.isoformat()
+            f.parcel_owner, f.owner_portfolio = "", 0
+            stats["sold"] += 1
             continue
 
         otype = classify_owner(normalize_name(f.plaintiff_name), f.plaintiff_is_person)

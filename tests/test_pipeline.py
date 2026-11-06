@@ -522,3 +522,55 @@ def test_county_street_type_spellings_normalize():
     assert parcels.street_key("5 ROCKY FORK BL") == parcels.street_key("5 ROCKY FORK BOULEVARD")
     assert parcels.street_key("9 TRINDEL WY") == parcels.street_key("9 TRINDEL WAY")
 
+
+
+def _index_with_sales(tmp_path, rows):
+    import parcels
+    p = tmp_path / "Parcel.csv"
+    lines = ["PARCEL ID,NAME1,STADDR,ZIPCODE,MAILAD3,MAILAD4,SALEDATE"] + [",".join(r) for r in rows]
+    p.write_text("\n".join(lines) + "\n")
+    wanted = {(r[2], r[3]) for r in rows}
+    return parcels.build_index(p, wanted)
+
+
+def test_sale_after_filing_is_not_credited_to_the_buyer(tmp_path):
+    """Manager filed in Oct 2026; property sold Nov 2026 -> owner of record is the BUYER: no re-attribution."""
+    import parcels
+    idx = _index_with_sales(tmp_path, [
+        ["1", "NEW BUYER LLC", "101 OAK ST", "43201", "9 BUYER WAY", "PHOENIX AZ 85001", "2026-11-02"],
+        ["2", "REAL OWNER LLC", "55 PINE AVE", "43206", "PO BOX 7", "DAYTON OH 45402", "2019-03-01"],
+    ])
+    ff = _filings("RIVERSIDE PROPERTY MANAGEMENT LLC",
+                  ["101 OAK ST, COLUMBUS, OH 43201", "55 PINE AVE, COLUMBUS, OH 43206"], zip5="43201")
+    ff[1].property_zip = "43206"
+    ff[0].file_date = ff[1].file_date = __import__("datetime").date(2026, 10, 5)
+    stats = parcels.enrich_filings(ff, idx)
+    assert ff[0].parcel_status == "sold" and ff[0].sold_on == "2026-11-02"
+    assert ff[0].plaintiff_name == "RIVERSIDE PROPERTY MANAGEMENT LLC" and ff[0].owner_portfolio == 0
+    assert ff[1].parcel_status == "via_manager" and ff[1].plaintiff_name == "REAL OWNER LLC"   # sale long before
+    assert stats["sold"] == 1 and stats["via_manager"] == 1
+
+
+def test_landlord_whose_matched_rentals_all_sold_is_flagged_and_not_hot():
+    from datetime import date
+    streets = ["OAK ST", "ELM AVE", "PINE RD", "MAPLE DR", "CEDAR LN", "BIRCH CT"]
+    ff = _filings("DOE, JANE", [f"{10 + i} {st}, COLUMBUS, OH 43232" for i, st in enumerate(streets)],
+                  is_person=True, pstate="AZ")
+    for f in ff[:4]:
+        f.parcel_status, f.sold_on = "sold", "2026-11-01"
+    for f in ff[4:]:
+        f.parcel_status = "unmatched"
+    out = landlord_leads.aggregate(ff, today=date(2026, 11, 3))[0]
+    assert out.sold_since == 4 and out.parcels_matched == 4
+    assert out.verification == "sold since filing" and out.tier != "HOT"
+    assert any("sold since the eviction filing" in s for s in out.signals)
+
+
+def test_gis_csv_carries_sale_date(monkeypatch):
+    import parcels
+    monkeypatch.setattr(config, "CACHE_DIR", config.DATA_DIR / "cache")
+    monkeypatch.setattr(config, "PARCEL_GIS_MIN_ROWS", 1)
+    path, _ = parcels.download_gis_parcels(_FakeGis(GIS_ROWS), url="http://x")
+    idx = parcels.build_index(path, {("55 PINE AVE", "43206"), ("9 MAPLE DR", "43211")})
+    assert idx.lookup("55 PINE AVE", "43206").sale_date.isoformat() == "2026-09-21"
+    assert idx.lookup("9 MAPLE DR", "43211").sale_date is None

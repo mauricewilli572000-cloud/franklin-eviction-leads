@@ -45,12 +45,13 @@ class Filing:
     source_file: str = ""
     plaintiff_is_person: bool | None = None   # True/False when the Clerk splits person vs company columns; None = unknown
     # Filled in by parcels.enrich_filings (Auditor owner matching)
-    parcel_status: str = ""        # "" not checked | unmatched | confirmed | mismatch | via_manager
+    parcel_status: str = ""        # "" not checked | unmatched | confirmed | mismatch | via_manager | sold
     parcel_owner: str = ""         # owner of record on the Auditor's file for the rental
     parcel_id: str = ""
     owner_portfolio: int = 0       # parcels that owner holds countywide
     via_manager: str = ""          # original plaintiff when a property manager filed for this owner
     court_mailing: str = ""        # the court's plaintiff address when replaced by the Auditor's mailing
+    sold_on: str = ""              # ISO date the rental last sold, when that is AFTER this filing (parcel_status "sold")
 
 
 def _norm_header(h: str) -> str:

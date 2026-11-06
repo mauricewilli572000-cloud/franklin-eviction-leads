@@ -93,11 +93,12 @@ class Landlord:
     signals: list[str] = field(default_factory=list)
     top_street_share: float = 0.0
     property_kind: str = "scattered"      # scattered | apartment complex
-    verification: str = ""                # verified | via manager | plaintiff not owner of record | no parcel match | ""
+    verification: str = ""                # verified | via manager | sold since filing | plaintiff not owner of record | no parcel match | ""
     portfolio: int = 0                    # parcels the owner holds countywide (Auditor)
     via_managers: list[str] = field(default_factory=list)
     court_mailing: str = ""
     parcels_matched: int = 0
+    sold_since: int = 0                   # rentals that changed hands after this landlord's eviction filing
 
     @property
     def lead_id(self) -> str:
@@ -177,17 +178,21 @@ def _compute(ll: Landlord, today: date) -> None:
 
     # Auditor owner verification (parcels.enrich_filings) -------------------------------------
     st = Counter(f.parcel_status for f in ll.filings if f.parcel_status)
-    ll.parcels_matched = st["confirmed"] + st["mismatch"] + st["via_manager"]
+    ll.parcels_matched = st["confirmed"] + st["mismatch"] + st["via_manager"] + st["sold"]
+    kept = {f.property_address for f in ll.filings if f.parcel_status in ("confirmed", "via_manager")}
+    ll.sold_since = len({f.property_address for f in ll.filings if f.parcel_status == "sold"} - kept)
     ll.portfolio = max((f.owner_portfolio for f in ll.filings), default=0)
     ll.via_managers = sorted({f.via_manager for f in ll.filings if f.via_manager})
     ll.court_mailing = next((f.court_mailing for f in newest_first if f.court_mailing), "")
     if not st:
         ll.verification = ""
-    elif st["via_manager"] and st["via_manager"] >= st["confirmed"] + st["mismatch"]:
+    elif st["via_manager"] and st["via_manager"] >= st["confirmed"] + st["mismatch"] + st["sold"]:
         ll.verification = "via manager"
-    elif st["confirmed"] and st["confirmed"] >= st["mismatch"]:
+    elif st["confirmed"] and st["confirmed"] >= st["mismatch"] + st["sold"]:
         ll.verification = "verified"
-    elif st["mismatch"]:
+    elif st["sold"] and st["sold"] >= st["mismatch"]:
+        ll.verification = "sold since filing"
+    elif st["mismatch"] or st["sold"]:
         ll.verification = "plaintiff not owner of record"
     else:
         ll.verification = "no parcel match"
@@ -279,6 +284,13 @@ def _score(ll: Landlord, today: date) -> None:
         sig.append(f"owner of record found via manager ({', '.join(ll.via_managers[:2])})")
     elif ll.verification == "plaintiff not owner of record":
         sig.append("plaintiff is not the owner of record - verify before outreach")
+    exited = False
+    if ll.sold_since:
+        exited = ll.sold_since / max(ll.parcels_matched, 1) >= 0.5
+        sig.append(f"{ll.sold_since} of {ll.parcels_matched} matched rentals sold since the eviction filing"
+                   + (" - landlord may have exited" if exited else ""))
+        if exited:
+            s = max(s - 20, 0)
 
     if ll.dismissed >= 2:
         s += 5; sig.append(f"{ll.dismissed} dismissals (tenant churn)")
@@ -286,7 +298,7 @@ def _score(ll: Landlord, today: date) -> None:
         s += 5; sig.append(f"{ll.writs} writ/restitution")
 
     s = min(s, 100)
-    if ll.property_kind != "scattered" or ll.owner_type == "manager":
+    if ll.property_kind != "scattered" or ll.owner_type == "manager" or exited:
         s = min(s, config.HOT_SCORE - 1)       # never HOT
     ll.score = s
     ll.tier = "HOT" if ll.score >= config.HOT_SCORE else "WARM" if ll.score >= config.WARM_SCORE else "COLD"
